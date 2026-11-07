@@ -10,6 +10,10 @@
 - `--resume` keeps pieces that are already on the target and hash correctly.
 
 ## Usage
+GUI: run `thallium-flash-gui`, pick the USB drive, press Flash. It asks for your password once (pkexec), only for the disk write.
+
+Build the GUI with `cargo build --release --features gui` (Linux needs `libfontconfig-dev libxkbcommon-dev`).
+
 Release side:
 ```sh
 thallium-flash split thallium-81-amd64.iso -o dist --version 0.6.12 \
@@ -24,7 +28,7 @@ thallium-flash flash -m ./manifest.json out.iso   # custom manifest
 ```
 
 ## Limits
-Writing to a USB drive is Linux-only for now. On Windows and macOS it can only write to a file. A GUI comes later.
+Writing to a USB drive is Linux-only for now. On Windows and macOS it can only write to a file. 
 
 ## License
 TBD

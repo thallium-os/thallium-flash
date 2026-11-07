@@ -13,7 +13,20 @@ reqwest = { version = "0.13.5", default-features = false, features = ["rustls", 
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
+slint = { version = "1.18.1", optional = true }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.191"
+
+[features]
+gui = ["dep:slint"]
+
+[[bin]]
+name = "thallium-flash"
+path = "src/main.rs"
+
+[[bin]]
+name = "thallium-flash-gui"
+path = "src/bin/gui.rs"
+required-features = ["gui"]

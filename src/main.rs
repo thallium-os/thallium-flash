@@ -56,6 +56,9 @@ enum Cmd {
         /// Skip the read-back verify
         #[arg(long)]
         no_verify: bool,
+        /// Machine-readable progress on stdout (used by the GUI)
+        #[arg(long)]
+        machine: bool,
     },
 }
 
@@ -63,8 +66,8 @@ enum Cmd {
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Split { iso, out, version, piece_mb, mirrors } => split::run(&iso, &out, &version, piece_mb, &mirrors),
-        Cmd::Flash { manifest, target, jobs, yes, force, resume, no_verify } => {
-            flash::run(flash::Opts { manifest, target, jobs, yes, force, resume, no_verify }).await
+        Cmd::Flash { manifest, target, jobs, yes, force, resume, no_verify, machine } => {
+            flash::run(flash::Opts { manifest, target, jobs, yes, force, resume, no_verify, machine }).await
         }
     }
 }

@@ -18,6 +18,8 @@ pub struct Opts {
     pub force: bool,
     pub resume: bool,
     pub no_verify: bool,
+    /// Print "<phase> <done> <total>" lines on stdout for the GUI.
+    pub machine: bool,
 }
 
 struct Ctx {
@@ -53,7 +55,7 @@ pub async fn run(o: Opts) -> Result<()> {
     }
 
     let total: u64 = todo.iter().map(|&i| { let (a, b) = m.piece_range(i); b - a }).sum();
-    let pb = bar(total, "download");
+    let pb = bar(total, "download", o.machine);
     let ctx = Arc::new(Ctx { m, file, client, done: AtomicU64::new(0), pb });
 
     stream::iter(todo)
@@ -70,7 +72,7 @@ pub async fn run(o: Opts) -> Result<()> {
         eprintln!("written (verify skipped)");
         return Ok(());
     }
-    let got = verify(&ctx.file, ctx.m.size).await?;
+    let got = verify(&ctx.file, ctx.m.size, o.machine).await?;
     if got != ctx.m.sha256 {
         bail!("verify FAILED: target sha256 {got}, expected {}", ctx.m.sha256);
     }
@@ -78,7 +80,18 @@ pub async fn run(o: Opts) -> Result<()> {
     Ok(())
 }
 
-fn bar(len: u64, msg: &'static str) -> ProgressBar {
+fn bar(len: u64, msg: &'static str, machine: bool) -> ProgressBar {
+    if machine {
+        let pb = ProgressBar::hidden();
+        pb.set_length(len);
+        let p = pb.clone();
+        std::thread::spawn(move || loop {
+            if p.is_finished() { break }
+            println!("{msg} {} {len}", p.position());
+            std::thread::sleep(Duration::from_millis(250));
+        });
+        return pb;
+    }
     let pb = ProgressBar::new(len).with_message(msg);
     pb.set_style(ProgressStyle::with_template(
         "{msg:8} [{bar:40}] {bytes}/{total_bytes} {binary_bytes_per_sec} eta {eta}",
@@ -175,9 +188,9 @@ async fn hash_region(file: &Arc<File>, (start, end): (u64, u64)) -> Result<Strin
     }).await?
 }
 
-async fn verify(file: &Arc<File>, size: u64) -> Result<String> {
+async fn verify(file: &Arc<File>, size: u64, machine: bool) -> Result<String> {
     let f = file.clone();
-    let pb = bar(size, "verify");
+    let pb = bar(size, "verify", machine);
     let pb2 = pb.clone();
     let got = tokio::task::spawn_blocking(move || {
         let mut h = Sha256::new();

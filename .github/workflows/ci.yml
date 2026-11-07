@@ -8,12 +8,16 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig-dev libxkbcommon-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release && cargo test
+      - run: cargo build --release --features gui && cargo test
       - uses: actions/upload-artifact@v4
         with:
-          name: thallium-flash-${{ matrix.os }}
+          name: thallium-flash-${{ runner.os }}
           path: |
             target/release/thallium-flash
+            target/release/thallium-flash-gui
             target/release/thallium-flash.exe
+            target/release/thallium-flash-gui.exe
