@@ -1,4 +1,5 @@
 use crate::manifest::{Manifest, Mirror, part_name};
+use crate::setup;
 use crate::target::{self, FLUSH};
 use anyhow::{Context, Result, bail};
 use futures_util::{StreamExt, TryStreamExt, stream};
@@ -20,6 +21,8 @@ pub struct Opts {
     pub no_verify: bool,
     /// Print "<phase> <done> <total>" lines on stdout for the GUI.
     pub machine: bool,
+    /// thallium-setup.toml to place on an extra partition after the image.
+    pub setup: Option<PathBuf>,
 }
 
 struct Ctx {
@@ -40,7 +43,14 @@ pub async fn run(o: Opts) -> Result<()> {
     eprintln!("{} {} — {:.2} GB, {} pieces, {} mirrors",
         m.name, m.version, m.size as f64 / 1e9, m.pieces.len(), m.mirrors.len());
 
-    let file = Arc::new(target::open(&o.target, m.size, o.force, o.yes, o.resume)?);
+    // Parse the setup config before touching the target so a typo can't
+    // leave a half-flashed drive.
+    let setup = o.setup.as_ref()
+        .map(|p| std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))
+            .and_then(|t| setup::SetupConfig::parse(&t)))
+        .transpose()?;
+    let need = if setup.is_some() { setup::partition_range(m.size).1 } else { m.size };
+    let file = Arc::new(target::open(&o.target, need, o.force, o.yes, o.resume)?);
 
     let mut todo: Vec<usize> = (0..m.pieces.len()).collect();
     if o.resume {
@@ -70,13 +80,20 @@ pub async fn run(o: Opts) -> Result<()> {
 
     if o.no_verify {
         eprintln!("written (verify skipped)");
-        return Ok(());
+    } else {
+        let got = verify(&ctx.file, ctx.m.size, o.machine).await?;
+        if got != ctx.m.sha256 {
+            bail!("verify FAILED: target sha256 {got}, expected {}", ctx.m.sha256);
+        }
+        eprintln!("verified: sha256 {got}");
     }
-    let got = verify(&ctx.file, ctx.m.size, o.machine).await?;
-    if got != ctx.m.sha256 {
-        bail!("verify FAILED: target sha256 {got}, expected {}", ctx.m.sha256);
+
+    // After verify: the setup partition edits the MBR inside the image's range.
+    if let Some(cfg) = setup {
+        let (f, size) = (ctx.file.clone(), ctx.m.size);
+        tokio::task::spawn_blocking(move || setup::write(&f, size, &cfg)).await??;
+        eprintln!("setup partition written ({})", setup::FILE_NAME);
     }
-    eprintln!("verified: sha256 {got}");
     Ok(())
 }
 

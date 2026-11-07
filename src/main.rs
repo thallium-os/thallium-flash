@@ -1,7 +1,4 @@
-mod flash;
-mod manifest;
-mod split;
-mod target;
+use thallium_flash::{flash, split};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -59,6 +56,9 @@ enum Cmd {
         /// Machine-readable progress on stdout (used by the GUI)
         #[arg(long)]
         machine: bool,
+        /// thallium-setup.toml with unattended install answers (adds a THALLIUMCFG partition)
+        #[arg(long)]
+        setup: Option<PathBuf>,
     },
 }
 
@@ -66,8 +66,8 @@ enum Cmd {
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Split { iso, out, version, piece_mb, mirrors } => split::run(&iso, &out, &version, piece_mb, &mirrors),
-        Cmd::Flash { manifest, target, jobs, yes, force, resume, no_verify, machine } => {
-            flash::run(flash::Opts { manifest, target, jobs, yes, force, resume, no_verify, machine }).await
+        Cmd::Flash { manifest, target, jobs, yes, force, resume, no_verify, machine, setup } => {
+            flash::run(flash::Opts { manifest, target, jobs, yes, force, resume, no_verify, machine, setup }).await
         }
     }
 }
