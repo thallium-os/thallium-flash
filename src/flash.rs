@@ -117,76 +117,88 @@ fn bar(len: u64, msg: &'static str, machine: bool) -> ProgressBar {
 }
 
 /// Fetch one piece, rotating through mirrors (starting at a different mirror
-/// per piece so load spreads across all of them) until its hash matches.
+/// per piece so load spreads across all of them). A dropped connection
+/// resumes from the last written 4 MiB block instead of restarting the piece.
 async fn piece(ctx: Arc<Ctx>, i: usize) -> Result<()> {
+    let (start, _) = ctx.m.piece_range(i);
     let n = ctx.m.mirrors.len();
-    let tries = (n * 2).max(3);
-    for attempt in 0..tries {
+    let mut h = Sha256::new();
+    let mut off = start;
+    for attempt in 0..(n * 4).max(10) {
         let mirror = &ctx.m.mirrors[(i + attempt) % n];
-        let mut written = 0;
-        let res = fetch(&ctx, mirror, i, &mut written).await;
-        match res {
-            Ok(h) if h == ctx.m.pieces[i] => return Ok(()),
-            Ok(_) => warn(&ctx.pb, format!("piece {i}: hash mismatch from {}", mirror.label())),
-            Err(e) => warn(&ctx.pb, format!("piece {i}: {} — {e:#}", mirror.label())),
+        match fetch(&ctx, mirror, i, &mut h, &mut off).await {
+            Ok(()) => {
+                if hex::encode(h.finalize_reset()) == ctx.m.pieces[i] {
+                    return Ok(());
+                }
+                warn(&ctx.pb, format!("piece {i}: hash mismatch from {}, refetching", mirror.label()));
+                let pos = ctx.done.fetch_sub(off - start, Ordering::Relaxed) - (off - start);
+                ctx.pb.set_position(pos);
+                off = start;
+            }
+            Err(e) => warn(&ctx.pb, format!("piece {i}: {} — {e:#} (resuming at {} MiB)",
+                mirror.label(), (off - start) >> 20)),
         }
-        let pos = ctx.done.fetch_sub(written, Ordering::Relaxed) - written;
-        ctx.pb.set_position(pos);
-        tokio::time::sleep(Duration::from_millis(500 * (attempt as u64 + 1))).await;
+        tokio::time::sleep(Duration::from_millis(500 * (attempt as u64 + 1).min(10))).await;
     }
     bail!("piece {i} failed on every mirror")
 }
 
-/// Stream a piece straight into the target at its offset, hashing as it goes.
-async fn fetch(ctx: &Ctx, mirror: &Mirror, i: usize, written: &mut u64) -> Result<String> {
+/// Stream the rest of a piece (from `off`) into the target. Bytes are hashed
+/// only once written, so `h` and `off` stay consistent across interruptions.
+async fn fetch(ctx: &Ctx, mirror: &Mirror, i: usize, h: &mut Sha256, off: &mut u64) -> Result<()> {
     let (start, end) = ctx.m.piece_range(i);
-    let len = end - start;
-    let req = match mirror {
-        Mirror::Whole { url } => ctx.client.get(url)
-            .header(reqwest::header::RANGE, format!("bytes={start}-{}", end - 1)),
-        Mirror::Parts { base } => ctx.client.get(format!("{}/{}",
-            base.trim_end_matches('/'), part_name(&ctx.m.name, i))),
+    let (from, len) = (*off, end - *off);
+    let (req, ranged) = match mirror {
+        Mirror::Whole { url } => (ctx.client.get(url)
+            .header(reqwest::header::RANGE, format!("bytes={from}-{}", end - 1)), true),
+        Mirror::Parts { base } => {
+            let req = ctx.client.get(format!("{}/{}", base.trim_end_matches('/'), part_name(&ctx.m.name, i)));
+            if from > start {
+                (req.header(reqwest::header::RANGE, format!("bytes={}-", from - start)), true)
+            } else {
+                (req, false)
+            }
+        }
     };
     let resp = req.send().await?.error_for_status()?;
-    if matches!(mirror, Mirror::Whole { .. }) && resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+    if ranged && resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
         bail!("server ignored Range (status {})", resp.status());
     }
     if let Some(cl) = resp.content_length() && cl != len {
         bail!("expected {len} bytes, server sends {cl}");
     }
 
-    let mut h = Sha256::new();
     let mut buf: Vec<u8> = Vec::with_capacity(FLUSH * 2);
-    let mut off = start;
     let mut body = resp.bytes_stream();
     while let Some(chunk) = body.next().await {
         let chunk = chunk.context("download interrupted")?;
-        if off + (buf.len() + chunk.len()) as u64 > end {
+        if *off + (buf.len() + chunk.len()) as u64 > end {
             bail!("server sent more than {len} bytes");
         }
-        h.update(&chunk);
         buf.extend_from_slice(&chunk);
         while buf.len() >= FLUSH {
             let rest = buf.split_off(FLUSH);
-            off = flush(ctx, std::mem::replace(&mut buf, rest), off, written).await?;
+            flush(ctx, std::mem::replace(&mut buf, rest), h, off).await?;
         }
     }
     if !buf.is_empty() {
-        off = flush(ctx, buf, off, written).await?;
+        flush(ctx, buf, h, off).await?;
     }
-    if off != end {
-        bail!("short read: got {} of {len} bytes", off - start);
+    if *off != end {
+        bail!("short read: {} bytes missing", end - *off);
     }
-    Ok(hex::encode(h.finalize()))
+    Ok(())
 }
 
-async fn flush(ctx: &Ctx, buf: Vec<u8>, off: u64, written: &mut u64) -> Result<u64> {
+async fn flush(ctx: &Ctx, buf: Vec<u8>, h: &mut Sha256, off: &mut u64) -> Result<()> {
     let n = buf.len() as u64;
-    let f = ctx.file.clone();
-    tokio::task::spawn_blocking(move || target::write_at(&f, &buf, off)).await??;
-    *written += n;
+    let (f, at) = (ctx.file.clone(), *off);
+    let buf = tokio::task::spawn_blocking(move || target::write_at(&f, &buf, at).map(|()| buf)).await??;
+    h.update(&buf);
+    *off += n;
     ctx.pb.set_position(ctx.done.fetch_add(n, Ordering::Relaxed) + n);
-    Ok(off + n)
+    Ok(())
 }
 
 async fn hash_region(file: &Arc<File>, (start, end): (u64, u64)) -> Result<String> {
