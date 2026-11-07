@@ -1,0 +1,19 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release && cargo test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: thallium-flash-${{ matrix.os }}
+          path: |
+            target/release/thallium-flash
+            target/release/thallium-flash.exe
