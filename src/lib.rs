@@ -1,3 +1,4 @@
+pub mod access;
 pub mod flash;
 pub mod health;
 pub mod manifest;

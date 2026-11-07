@@ -1,3 +1,4 @@
+use crate::access;
 use crate::manifest::{Manifest, Mirror, part_name};
 use crate::setup;
 use crate::target::{self, FLUSH};
@@ -23,6 +24,18 @@ pub struct Opts {
     pub machine: bool,
     /// thallium-setup.toml to place on an extra partition after the image.
     pub setup: Option<PathBuf>,
+    /// File holding a Cloudflare Access token (the web UI passes it this way).
+    pub access_token_file: Option<PathBuf>,
+}
+
+#[cfg(target_os = "linux")]
+fn running_as_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn running_as_root() -> bool {
+    false
 }
 
 struct Ctx {
@@ -34,12 +47,27 @@ struct Ctx {
 }
 
 pub async fn run(o: Opts) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("thallium-flash/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(15))
-        .read_timeout(Duration::from_secs(30))
-        .build()?;
-    let m = Manifest::load(&o.manifest, &client).await?;
+    // Invite-only downloads sit behind Cloudflare Access: use a token handed
+    // over by the web UI, else cloudflared's cached one, else sign in.
+    let origin = access::origin(&o.manifest);
+    let mut token = match &o.access_token_file {
+        Some(p) => Some(std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?.trim().to_string()),
+        None => origin.as_deref().and_then(access::cached_token),
+    };
+    let mut client = access::client(token.as_deref())?;
+    let m = match Manifest::load(&o.manifest, &client).await {
+        Err(e) if e.is::<access::LoginRequired>() && o.access_token_file.is_none() && !running_as_root() => {
+            let origin = origin.context("manifest URL has no host")?;
+            eprintln!("This download is invite-only. Opening the sign-in page for {origin}…");
+            token = Some(access::login(&origin)?);
+            client = access::client(token.as_deref())?;
+            Manifest::load(&o.manifest, &client).await?
+        }
+        Err(e) if e.is::<access::LoginRequired>() => bail!(
+            "{e}. As root, sign in first as your normal user:\n  cloudflared access login {o}\n  cloudflared access token -app={o} > token.txt\n  sudo thallium-flash flash --access-token-file token.txt …\nor use `thallium-flash web`, which handles sign-in for you.",
+            o = origin.unwrap_or_default()),
+        r => r?,
+    };
     eprintln!("{} {} — {:.2} GB, {} pieces, {} mirrors",
         m.name, m.version, m.size as f64 / 1e9, m.pieces.len(), m.mirrors.len());
 

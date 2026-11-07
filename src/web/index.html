@@ -62,6 +62,13 @@
   <h1>Thallium Flash</h1>
   <p class="sub" id="image">Makes a bootable Thallium 81 USB drive.</p>
 
+  <section class="card" id="signin" hidden>
+    <div class="label">Invite only</div>
+    <p style="margin:0 0 14px">This download is limited to invited people. Sign in with the email you were invited with, and Cloudflare emails you a one-time code.</p>
+    <button id="signin-btn">Sign in</button>
+    <p class="hint" id="signin-msg">Needs <a style="color:var(--accent)" href="https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/" target="_blank" rel="noopener">cloudflared</a> installed.</p>
+  </section>
+
   <section class="card">
     <div class="label">USB drive</div>
     <div class="row">
@@ -119,7 +126,7 @@ const api = (path, opts = {}) => fetch(path, { ...opts, headers: { "x-token": to
 const PILL = { ok: "READY", note: "READY, WITH NOTES", fail: "NOT SUPPORTED", info: "UNKNOWN" };
 const TAG = { ok: "OK", note: "NOTE", fail: "FAIL", info: "INFO" };
 const FIELDS = ["username", "full_name", "password", "hostname", "timezone", "locale", "keyboard", "wifi_ssid", "wifi_pass", "channel", "theme", "apps"];
-let drives = [], busy = false, canFlash = true;
+let drives = [], busy = false, canFlash = true, signedOut = false;
 
 function setStatus(text, cls = "") { $("status").textContent = text; $("status").className = cls; }
 
@@ -128,6 +135,8 @@ async function load() {
   if (!r.ok) { setStatus("This page needs the link printed by thallium-flash (it carries an access token).", "fail"); return; }
   const info = await r.json();
   canFlash = info.can_flash;
+  signedOut = info.login_needed;
+  $("signin").hidden = !signedOut;
   drives = info.drives;
   $("drive").innerHTML = drives.length
     ? drives.map(d => `<option value="${esc(d.path)}">${esc(d.name)} · ${esc(d.model || "USB drive")} · ${gb(d.size)}</option>`).join("")
@@ -147,7 +156,8 @@ async function load() {
 }
 
 function update() {
-  $("flash").disabled = busy || !canFlash || !drives.length;
+  $("flash").disabled = busy || signedOut || !canFlash || !drives.length;
+  $("signin-btn").disabled = busy;
   $("refresh").disabled = busy;
   $("drive").disabled = busy;
 }
@@ -199,6 +209,14 @@ async function poll() {
 
 $("customize").onchange = e => { $("form").hidden = !e.target.checked; };
 $("refresh").onclick = load;
+$("signin-btn").onclick = async () => {
+  busy = true; update();
+  $("signin-msg").textContent = "Finish signing in in the browser tab that just opened…";
+  const r = await api("/api/login", { method: "POST" });
+  busy = false;
+  if (r.ok) { $("signin-msg").textContent = ""; await load(); }
+  else { $("signin-msg").textContent = await r.text(); update(); }
+};
 $("flash").onclick = flash;
 load().then(async () => { const j = await (await api("/api/job")).json(); if (j.running) { busy = true; update(); poll(); } });
 </script>

@@ -6,6 +6,7 @@
 //! fragment) and a localhost Host header, so other websites open in the
 //! browser can't drive it (CSRF / DNS rebinding).
 
+use crate::access;
 use crate::health;
 use crate::manifest::Manifest;
 use crate::setup::{Account, Channel, SetupConfig, System, Thallium, Theme, Wifi};
@@ -45,6 +46,9 @@ struct Ctx {
     manifest: String,
     image: Mutex<Option<ImageInfo>>,
     job: Mutex<Job>,
+    /// Cloudflare Access token for invite-only downloads.
+    token_access: Mutex<Option<String>>,
+    login_needed: Mutex<bool>,
 }
 
 #[derive(Serialize)]
@@ -55,6 +59,7 @@ struct Info {
     device: health::Device,
     drives: Vec<Drive>,
     image: Option<ImageInfo>,
+    login_needed: bool,
     timezone: String,
     locale: String,
     can_flash: bool,
@@ -97,21 +102,19 @@ pub async fn serve(manifest: String, port: u16, open: bool) -> Result<()> {
         manifest: manifest.clone(),
         image: Mutex::new(None),
         job: Mutex::new(Job::default()),
+        token_access: Mutex::new(access::origin(&manifest).and_then(|o| access::cached_token(&o))),
+        login_needed: Mutex::new(false),
     });
 
     // Fetch the manifest once in the background so the page can show the build.
-    let c = ctx.clone();
-    tokio::spawn(async move {
-        if let Ok(m) = Manifest::load(&c.manifest, &reqwest::Client::new()).await {
-            *c.image.lock().unwrap() = Some(ImageInfo { version: m.version, size: m.size });
-        }
-    });
+    tokio::spawn(fetch_image(ctx.clone()));
 
     let app = Router::new()
         .route("/", get(page))
         .route("/api/info", get(info))
         .route("/api/job", get(job))
         .route("/api/flash", post(flash))
+        .route("/api/login", post(login))
         .with_state(ctx.clone());
 
     let url = format!("http://127.0.0.1:{port}/#{}", ctx.token);
@@ -149,6 +152,7 @@ async fn info(State(ctx): State<Arc<Ctx>>, h: HeaderMap) -> Response {
         device: health::scan(),
         drives: drives(),
         image: ctx.image.lock().unwrap().clone(),
+        login_needed: *ctx.login_needed.lock().unwrap(),
         timezone: tz,
         locale: std::env::var("LANG").unwrap_or_default(),
         can_flash: cfg!(target_os = "linux"),
@@ -162,6 +166,9 @@ async fn job(State(ctx): State<Arc<Ctx>>, h: HeaderMap) -> Response {
 
 async fn flash(State(ctx): State<Arc<Ctx>>, h: HeaderMap, Json(req): Json<FlashReq>) -> Response {
     if let Err(r) = guard(&ctx, &h) { return r; }
+    if *ctx.login_needed.lock().unwrap() {
+        return (StatusCode::FORBIDDEN, "Sign in first: this download is invite-only.").into_response();
+    }
     let bad = |m: String| (StatusCode::BAD_REQUEST, m).into_response();
 
     // Only drives we listed ourselves (removable, whole disks) can be targets.
@@ -209,11 +216,27 @@ fn run_child(ctx: &Ctx, target: PathBuf, setup: Option<PathBuf>) {
     if let Some(s) = &setup {
         cmd.arg("--setup").arg(s);
     }
+    // The root child can't reach this user's cloudflared login, so hand the
+    // token over in a private file rather than on the (world-readable) cmdline.
+    let token = ctx.token_access.lock().unwrap().clone();
+    let token_file = match token.map(|t| write_private("access-token", t.as_bytes())).transpose() {
+        Ok(p) => p,
+        Err(e) => return finish(ctx, false, format!("Couldn't hand over the sign-in: {e}")),
+    };
+    if let Some(p) = &token_file {
+        cmd.arg("--access-token-file").arg(p);
+    }
     cmd.arg(&target);
 
-    let mut child = match cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn() {
+    let child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
+    let cleanup = || {
+        for p in [&setup, &token_file].into_iter().flatten() {
+            let _ = std::fs::remove_file(p);
+        }
+    };
+    let mut child = match child {
         Ok(c) => c,
-        Err(e) => return finish(ctx, false, format!("Couldn't start the flasher: {e}")),
+        Err(e) => { cleanup(); return finish(ctx, false, format!("Couldn't start the flasher: {e}")); }
     };
     let mut err = child.stderr.take().unwrap();
     let err_thread = std::thread::spawn(move || { let mut s = String::new(); let _ = err.read_to_string(&mut s); s });
@@ -228,7 +251,7 @@ fn run_child(ctx: &Ctx, target: PathBuf, setup: Option<PathBuf>) {
     }
     let status = child.wait();
     let stderr = err_thread.join().unwrap_or_default();
-    if let Some(p) = &setup { let _ = std::fs::remove_file(p); }
+    cleanup();
     match status {
         Ok(s) if s.success() => finish(ctx, true, "Done. The drive checks out, so you can unplug it and boot Thallium.".into()),
         Ok(s) if s.code() == Some(126) => finish(ctx, false, "Cancelled at the password prompt. Nothing was written.".into()),
@@ -312,12 +335,52 @@ fn build_config(f: SetupForm) -> Result<SetupConfig, String> {
 
 /// Private temp file (0600) handed to the child, removed after the run.
 fn write_temp_config(cfg: &SetupConfig) -> Result<PathBuf> {
-    let path = std::env::temp_dir().join(format!("thallium-setup-{}.toml", std::process::id()));
-    let text = cfg.to_toml()?;
+    write_private("setup.toml", cfg.to_toml()?.as_bytes())
+}
+
+/// New 0600 file in the temp dir; create_new so an existing (possibly
+/// planted) file with looser permissions is never reused.
+fn write_private(name: &str, data: &[u8]) -> Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!("thallium-flash-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
     let mut o = std::fs::OpenOptions::new();
-    o.write(true).create(true).truncate(true);
+    o.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
-    std::io::Write::write_all(&mut o.open(&path)?, text.as_bytes())?;
+    std::io::Write::write_all(&mut o.open(&path)?, data)?;
     Ok(path)
+}
+
+/// Load the manifest for the page header; flags a needed sign-in.
+async fn fetch_image(ctx: Arc<Ctx>) {
+    let token = ctx.token_access.lock().unwrap().clone();
+    let Ok(client) = access::client(token.as_deref()) else { return };
+    match Manifest::load(&ctx.manifest, &client).await {
+        Ok(m) => {
+            *ctx.image.lock().unwrap() = Some(ImageInfo { version: m.version, size: m.size });
+            *ctx.login_needed.lock().unwrap() = false;
+        }
+        Err(e) if e.is::<access::LoginRequired>() => *ctx.login_needed.lock().unwrap() = true,
+        Err(_) => {}
+    }
+}
+
+/// Run the cloudflared email-code sign-in (opens the browser) and wait.
+async fn login(State(ctx): State<Arc<Ctx>>, h: HeaderMap) -> Response {
+    if let Err(r) = guard(&ctx, &h) { return r; }
+    let Some(origin) = access::origin(&ctx.manifest) else {
+        return (StatusCode::BAD_REQUEST, "No download host to sign in to.").into_response();
+    };
+    match tokio::task::spawn_blocking(move || access::login(&origin)).await {
+        Ok(Ok(t)) => {
+            *ctx.token_access.lock().unwrap() = Some(t);
+            fetch_image(ctx.clone()).await;
+            if *ctx.login_needed.lock().unwrap() {
+                return (StatusCode::FORBIDDEN, "Signed in, but this email isn't on the invite list.").into_response();
+            }
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Ok(Err(e)) => (StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
 }

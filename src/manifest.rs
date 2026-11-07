@@ -64,7 +64,11 @@ impl Manifest {
 
     pub async fn load(src: &str, client: &reqwest::Client) -> Result<Self> {
         let text = if src.starts_with("http://") || src.starts_with("https://") {
-            client.get(src).send().await?.error_for_status()?.text().await?
+            let resp = client.get(src).send().await?;
+            if crate::access::is_login_page(&resp) {
+                return Err(crate::access::LoginRequired.into());
+            }
+            resp.error_for_status()?.text().await?
         } else {
             std::fs::read_to_string(src).with_context(|| format!("reading {src}"))?
         };

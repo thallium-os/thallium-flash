@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 const DEFAULT_MANIFEST: &str =
-    "https://github.com/thallium-os/thallium-flash/releases/latest/download/manifest.json";
+    "https://dl.thallium81.dev/manifest.json";
 
 /// Parallel, multi-mirror image downloader that writes straight to USB.
 #[derive(Parser)]
@@ -59,6 +59,9 @@ enum Cmd {
         /// thallium-setup.toml with unattended install answers (adds a THALLIUMCFG partition)
         #[arg(long)]
         setup: Option<PathBuf>,
+        /// File with a Cloudflare Access token (for invite-only downloads when run as root)
+        #[arg(long)]
+        access_token_file: Option<PathBuf>,
     },
     /// Open the flasher as a local web page (like Ventoy's WebUI)
     Web {
@@ -78,8 +81,8 @@ enum Cmd {
 async fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Split { iso, out, version, piece_mb, mirrors } => split::run(&iso, &out, &version, piece_mb, &mirrors),
-        Cmd::Flash { manifest, target, jobs, yes, force, resume, no_verify, machine, setup } => {
-            flash::run(flash::Opts { manifest, target, jobs, yes, force, resume, no_verify, machine, setup }).await
+        Cmd::Flash { manifest, target, jobs, yes, force, resume, no_verify, machine, setup, access_token_file } => {
+            flash::run(flash::Opts { manifest, target, jobs, yes, force, resume, no_verify, machine, setup, access_token_file }).await
         }
         Cmd::Web { manifest, port, no_open } => web::serve(manifest, port, !no_open).await,
     }
