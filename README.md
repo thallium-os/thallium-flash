@@ -10,9 +10,7 @@
 - `--resume` keeps pieces that are already on the target and hash correctly.
 
 ## Usage
-GUI: run `thallium-flash-gui`, pick the USB drive, press Flash. It asks for your password once (pkexec), only for the disk write.
-
-Build the GUI with `cargo build --release --features gui` (Linux needs `libfontconfig-dev libxkbcommon-dev`).
+Easiest: `thallium-flash web` opens a local page in your browser (like Ventoy's WebUI). Pick the USB drive and press Flash. It asks for your password once (pkexec), only for the disk write. The page is served on 127.0.0.1 only and needs the per-run token in the printed link.
 
 Release side:
 ```sh
@@ -28,7 +26,7 @@ thallium-flash flash -m ./manifest.json out.iso   # custom manifest
 ```
 
 ## Unattended install
-The GUI's **Customize** section, or `--setup thallium-setup.toml`, adds a `THALLIUMCFG` partition with installer answers: account, hostname, time zone, Wi-Fi, channel and apps. Secrets are stored hashed. See [docs/setup-config.md](docs/setup-config.md).
+The web page's **Set up the install in advance** section, or `--setup thallium-setup.toml`, adds a `THALLIUMCFG` partition with installer answers: account, hostname, time zone, Wi-Fi, channel and apps. Secrets are stored hashed. See [docs/setup-config.md](docs/setup-config.md).
 
 ## Limits
 Writing to a USB drive is Linux-only for now. On Windows and macOS it can only write to a file. 

@@ -1,4 +1,4 @@
-use thallium_flash::{flash, split};
+use thallium_flash::{flash, split, web};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -60,6 +60,18 @@ enum Cmd {
         #[arg(long)]
         setup: Option<PathBuf>,
     },
+    /// Open the flasher as a local web page (like Ventoy's WebUI)
+    Web {
+        /// manifest.json URL or path
+        #[arg(short, long, default_value = DEFAULT_MANIFEST)]
+        manifest: String,
+        /// Port on 127.0.0.1 (0 = pick a free one)
+        #[arg(short, long, default_value_t = 0)]
+        port: u16,
+        /// Print the link instead of opening the browser
+        #[arg(long)]
+        no_open: bool,
+    },
 }
 
 #[tokio::main]
@@ -69,5 +81,6 @@ async fn main() -> Result<()> {
         Cmd::Flash { manifest, target, jobs, yes, force, resume, no_verify, machine, setup } => {
             flash::run(flash::Opts { manifest, target, jobs, yes, force, resume, no_verify, machine, setup }).await
         }
+        Cmd::Web { manifest, port, no_open } => web::serve(manifest, port, !no_open).await,
     }
 }

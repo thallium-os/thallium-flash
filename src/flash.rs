@@ -75,6 +75,9 @@ pub async fn run(o: Opts) -> Result<()> {
         .await?;
     ctx.pb.finish();
 
+    if o.machine {
+        println!("sync 0 0");
+    }
     let f = ctx.file.clone();
     tokio::task::spawn_blocking(move || { f.sync_all()?; target::drop_cache(&f); anyhow::Ok(()) }).await??;
 
@@ -90,6 +93,9 @@ pub async fn run(o: Opts) -> Result<()> {
 
     // After verify: the setup partition edits the MBR inside the image's range.
     if let Some(cfg) = setup {
+        if o.machine {
+            println!("setup 0 0");
+        }
         let (f, size) = (ctx.file.clone(), ctx.m.size);
         tokio::task::spawn_blocking(move || setup::write(&f, size, &cfg)).await??;
         eprintln!("setup partition written ({})", setup::FILE_NAME);
