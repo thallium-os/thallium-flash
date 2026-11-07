@@ -19,6 +19,7 @@ sha-crypt = { version = "0.6.0", optional = true, features = ["getrandom"] }
 sha1 = { version = "0.11.0", optional = true }
 sha2 = "0.11.1"
 slint = { version = "1.18.1", optional = true }
+sysinfo = { version = "0.40.1", optional = true }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
 toml = "1.2.1"
 
@@ -26,7 +27,7 @@ toml = "1.2.1"
 libc = "0.2.191"
 
 [features]
-gui = ["dep:slint", "dep:sha-crypt", "dep:pbkdf2", "dep:sha1"]
+gui = ["dep:slint", "dep:sysinfo", "dep:sha-crypt", "dep:pbkdf2", "dep:sha1"]
 
 [[bin]]
 name = "thallium-flash"
@@ -34,5 +35,5 @@ path = "src/main.rs"
 
 [[bin]]
 name = "thallium-flash-gui"
-path = "src/bin/gui.rs"
+path = "src/bin/gui/main.rs"
 required-features = ["gui"]

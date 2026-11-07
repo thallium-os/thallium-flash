@@ -11,110 +11,14 @@ use std::process::{Command, Stdio};
 use std::rc::Rc;
 use thallium_flash::setup::{Account, Channel, SetupConfig, System, Thallium, Theme, Wifi};
 
-slint::slint! {
-    import { Button, CheckBox, ComboBox, LineEdit, ProgressIndicator, ScrollView } from "std-widgets.slint";
+mod health;
+mod ui;
 
-    component Field inherits HorizontalLayout {
-        in property <string> label;
-        spacing: 10px;
-        Text { text: label; width: 110px; vertical-alignment: center; opacity: 0.8; }
-        @children
-    }
+use slint::ComponentHandle;
+use ui::{App, Drive, Req};
 
-    export component App inherits Window {
-        title: "Thallium Flash";
-        preferred-width: 520px;
-        in property <[string]> drives;
-        in-out property <int> drive-index: 0;
-        in property <float> progress;
-        in property <string> status: "Pick a USB drive. Everything on it will be erased.";
-        in property <bool> busy;
-        in property <bool> can-customize;
-        in-out property <bool> customize;
-
-        in-out property <string> username;
-        in-out property <string> full-name;
-        in-out property <string> password;
-        in-out property <bool> autologin;
-        in-out property <string> hostname;
-        in-out property <string> timezone;
-        in-out property <string> locale;
-        in-out property <string> keyboard;
-        in-out property <string> wifi-ssid;
-        in-out property <string> wifi-pass;
-        in-out property <int> channel: 0;
-        in-out property <int> theme: 0;
-        in-out property <string> apps;
-        in-out property <bool> skip-setup;
-
-        callback flash(int);
-        callback refresh();
-
-        VerticalLayout {
-            padding: 28px;
-            spacing: 14px;
-            Text { text: "Thallium 81"; font-size: 26px; font-weight: 700; }
-            Text {
-                text: "Downloads the latest ISO from every mirror at once and writes it straight to your drive.";
-                wrap: word-wrap;
-                opacity: 0.7;
-            }
-            HorizontalLayout {
-                spacing: 8px;
-                ComboBox {
-                    model: drives;
-                    current-index <=> drive-index;
-                    enabled: !busy && drives.length > 0;
-                    horizontal-stretch: 1;
-                }
-                Button { text: "Refresh"; enabled: !busy; clicked => { refresh(); } }
-            }
-            if can-customize: CheckBox {
-                text: "Customize the install (answers the installer's questions for you)";
-                checked <=> customize;
-                enabled: !busy;
-            }
-            if can-customize && customize: ScrollView {
-                height: 300px;
-                enabled: !busy;
-                VerticalLayout {
-                    spacing: 8px;
-                    padding-right: 12px;
-                    Text { text: "Leave anything blank and the installer asks for it."; opacity: 0.6; font-size: 12px; }
-                    Field { label: "Username"; LineEdit { text <=> username; placeholder-text: "e.g. neel"; } }
-                    Field { label: "Full name"; LineEdit { text <=> full-name; } }
-                    Field { label: "Password"; LineEdit { text <=> password; input-type: InputType.password; placeholder-text: "stored only as a hash"; } }
-                    CheckBox { text: "Log in automatically"; checked <=> autologin; }
-                    Field { label: "Computer name"; LineEdit { text <=> hostname; placeholder-text: "e.g. thallium-laptop"; } }
-                    Field { label: "Time zone"; LineEdit { text <=> timezone; placeholder-text: "e.g. Asia/Kolkata"; } }
-                    Field { label: "Language"; LineEdit { text <=> locale; placeholder-text: "e.g. en_IN.UTF-8"; } }
-                    Field { label: "Keyboard"; LineEdit { text <=> keyboard; placeholder-text: "e.g. us"; } }
-                    Field { label: "Wi-Fi name"; LineEdit { text <=> wifi-ssid; } }
-                    Field { label: "Wi-Fi password"; LineEdit { text <=> wifi-pass; input-type: InputType.password; placeholder-text: "stored only as the derived key"; } }
-                    Field { label: "Channel"; ComboBox { model: ["Vanguard", "Edge Runners"]; current-index <=> channel; } }
-                    Field { label: "Theme"; ComboBox { model: ["Dark", "Light"]; current-index <=> theme; } }
-                    Field { label: "Extra apps"; LineEdit { text <=> apps; placeholder-text: "comma separated package names"; } }
-                    CheckBox { text: "Skip the welcome screens on first boot"; checked <=> skip-setup; }
-                    Text {
-                        text: "This file stays readable on the USB drive. The disk to install to is still chosen in the installer.";
-                        wrap: word-wrap; opacity: 0.6; font-size: 12px;
-                    }
-                }
-            }
-            ProgressIndicator { progress: progress; height: 6px; }
-            Text { text: status; wrap: word-wrap; }
-            Button {
-                text: "Flash";
-                primary: true;
-                enabled: !busy && drives.length > 0;
-                clicked => { flash(drive-index); }
-            }
-        }
-    }
-}
-
-/// (target path passed to the CLI, label shown in the picker)
-fn targets() -> Vec<(PathBuf, String)> {
+/// (target path passed to the CLI, short name, detail)
+fn targets() -> Vec<(PathBuf, String, String)> {
     #[cfg(target_os = "linux")]
     {
         let mut v = Vec::new();
@@ -126,9 +30,9 @@ fn targets() -> Vec<(PathBuf, String)> {
                 continue;
             }
             let name = e.file_name().to_string_lossy().into_owned();
-            let label = format!("{name} · {} {} · {:.1} GB",
+            let label = format!("{} {} · {:.1} GB",
                 read("device/vendor"), read("device/model"), bytes as f64 / 1e9);
-            v.push((PathBuf::from("/dev").join(&name), label));
+            v.push((PathBuf::from("/dev").join(&name), name, label));
         }
         v.sort();
         v
@@ -137,7 +41,7 @@ fn targets() -> Vec<(PathBuf, String)> {
     {
         let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).unwrap_or_default();
         let p = PathBuf::from(home).join("Downloads").join("thallium-81-amd64.iso");
-        vec![(p, "Save the ISO to your Downloads folder (USB writing is Linux-only for now)".into())]
+        vec![(p, "ISO FILE".into(), "Save to your Downloads folder (USB writing is Linux-only for now)".into())]
     }
 }
 
@@ -223,20 +127,40 @@ fn main() -> Result<(), slint::PlatformError> {
     app.set_can_customize(cfg!(target_os = "linux"));
     app.set_timezone(host_timezone().into());
     app.set_locale(std::env::var("LANG").unwrap_or_default().into());
-    let list: Rc<std::cell::RefCell<Vec<(PathBuf, String)>>> = Default::default();
+    let list: Rc<std::cell::RefCell<Vec<(PathBuf, String, String)>>> = Default::default();
+
+    // The device card is filled at start; "Check now" re-scans and reveals the verdict.
+    let scan = {
+        let app = app.as_weak();
+        move |reveal: bool| {
+            let d = health::scan();
+            let Some(app) = app.upgrade() else { return };
+            let worst = d.checks.iter().map(|c| c.level).filter(|l| *l != health::Level::Info)
+                .map(|l| l as i32).max().unwrap_or(0);
+            let reqs: Vec<Req> = d.checks.into_iter().map(|c| Req {
+                label: c.label.into(), value: c.value.into(), note: c.note.into(), level: c.level as i32,
+            }).collect();
+            app.set_device_name(d.name.into());
+            app.set_device_os(d.os.into());
+            app.set_reqs(Rc::new(slint::VecModel::from(reqs)).into());
+            app.set_verdict(worst);
+            if reveal {
+                app.set_checked(true);
+            }
+        }
+    };
+    scan(false);
+    app.on_run_check(move || scan(true));
 
     let load = {
         let (app, list) = (app.as_weak(), list.clone());
         move || {
             let t = targets();
-            let labels: Vec<slint::SharedString> = t.iter().map(|(_, l)| l.into()).collect();
+            let drives: Vec<Drive> = t.iter().map(|(_, n, d)| Drive { name: n.into(), detail: d.into() }).collect();
             *list.borrow_mut() = t;
             if let Some(app) = app.upgrade() {
-                if labels.is_empty() {
-                    app.set_status("No USB drive found. Plug one in and press Refresh.".into());
-                }
                 app.set_drive_index(0);
-                app.set_drives(Rc::new(slint::VecModel::from(labels)).into());
+                app.set_drives(Rc::new(slint::VecModel::from(drives)).into());
             }
         }
     };
@@ -245,7 +169,7 @@ fn main() -> Result<(), slint::PlatformError> {
 
     let weak = app.as_weak();
     app.on_flash(move |i| {
-        let Some(target) = list.borrow().get(i as usize).map(|(p, _)| p.clone()) else { return };
+        let Some(target) = list.borrow().get(i as usize).map(|(p, _, _)| p.clone()) else { return };
         let Some(app) = weak.upgrade() else { return };
 
         let setup_path = if app.get_customize() {
