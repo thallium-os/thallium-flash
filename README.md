@@ -2,6 +2,19 @@
 
 > Downloads the Thallium 81 ISO from several mirrors at once and writes it straight to a USB drive. For anyone installing Thallium.
 
+## Quick Start
+Invite-only: you need an invited email. One command signs you in, downloads the ISO and flashes it.
+
+Linux (opens a page: sign in, pick the USB drive, press Flash):
+```sh
+curl -fsSL https://raw.githubusercontent.com/thallium-os/thallium-flash/main/get.sh | sh
+```
+macOS (Apple Silicon) uses the same command and saves a verified ISO to Downloads. Windows (PowerShell):
+```powershell
+irm https://raw.githubusercontent.com/thallium-os/thallium-flash/main/get.ps1 | iex
+```
+Nothing is installed system-wide; files go in `~/.local/share/thallium-flash` (`%LOCALAPPDATA%\thallium-flash` on Windows).
+
 ## What it does
 - Splits the ISO into hashed pieces (256 MiB each by default), so each file fits under GitHub's 2 GiB limit.
 - Downloads 8 pieces in parallel from every listed mirror: R2 (via HTTP range requests on the full ISO) and GitHub Releases (part files).
