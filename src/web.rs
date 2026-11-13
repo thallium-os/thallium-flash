@@ -27,6 +27,8 @@ const PAGE: &str = include_str!("web/index.html");
 #[derive(Serialize, Clone, Default)]
 struct Job {
     running: bool,
+    /// flash (USB drive) | download (ISO file)
+    kind: String,
     drive: String,
     /// download | sync | verify | setup
     phase: String,
@@ -63,6 +65,8 @@ struct Info {
     timezone: String,
     locale: String,
     can_flash: bool,
+    /// Where "Download ISO" saves to.
+    download_dir: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -114,6 +118,7 @@ pub async fn serve(manifest: String, port: u16, open: bool) -> Result<()> {
         .route("/api/info", get(info))
         .route("/api/job", get(job))
         .route("/api/flash", post(flash))
+        .route("/api/download", post(download))
         .route("/api/login", post(login))
         .with_state(ctx.clone());
 
@@ -156,6 +161,7 @@ async fn info(State(ctx): State<Arc<Ctx>>, h: HeaderMap) -> Response {
         timezone: tz,
         locale: std::env::var("LANG").unwrap_or_default(),
         can_flash: cfg!(target_os = "linux"),
+        download_dir: download_dir().display().to_string(),
     }).into_response()
 }
 
@@ -184,7 +190,7 @@ async fn flash(State(ctx): State<Arc<Ctx>>, h: HeaderMap, Json(req): Json<FlashR
         if j.running {
             return (StatusCode::CONFLICT, "A flash is already running.").into_response();
         }
-        *j = Job { running: true, drive: drive.name.clone(), phase: "start".into(), ..Default::default() };
+        *j = Job { running: true, kind: "flash".into(), drive: drive.name.clone(), phase: "start".into(), ..Default::default() };
     }
     let setup_path = match setup.map(|c| write_temp_config(&c)).transpose() {
         Ok(p) => p,
@@ -194,8 +200,49 @@ async fn flash(State(ctx): State<Arc<Ctx>>, h: HeaderMap, Json(req): Json<FlashR
         }
     };
     let c = ctx.clone();
-    std::thread::spawn(move || run_child(&c, PathBuf::from(&drive.path), setup_path));
+    std::thread::spawn(move || run_child(&c, PathBuf::from(&drive.path), setup_path, false));
     StatusCode::ACCEPTED.into_response()
+}
+
+/// Save the plain ISO into the user's Downloads folder, for a VM or another
+/// flasher. Runs as this user (no pkexec), and an existing file is resumed:
+/// pieces that already hash correctly are kept.
+async fn download(State(ctx): State<Arc<Ctx>>, h: HeaderMap) -> Response {
+    if let Err(r) = guard(&ctx, &h) { return r; }
+    if *ctx.login_needed.lock().unwrap() {
+        return (StatusCode::FORBIDDEN, "Sign in first: this download is invite-only.").into_response();
+    }
+    let Some(version) = ctx.image.lock().unwrap().as_ref().map(|i| i.version.clone()) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "Still loading the build details. Try again in a moment.").into_response();
+    };
+    let dir = download_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("Couldn't create {}: {e}", dir.display())).into_response();
+    }
+    // The version comes from the manifest: keep only filename-safe characters.
+    let safe: String = version.chars().filter(|c| c.is_ascii_alphanumeric() || ".-_~+".contains(*c)).collect();
+    let path = dir.join(format!("thallium-81-{safe}-amd64.iso"));
+    {
+        let mut j = ctx.job.lock().unwrap();
+        if j.running {
+            return (StatusCode::CONFLICT, "A flash or download is already running.").into_response();
+        }
+        *j = Job { running: true, kind: "download".into(), drive: path.display().to_string(), phase: "start".into(), ..Default::default() };
+    }
+    let c = ctx.clone();
+    std::thread::spawn(move || run_child(&c, path, None, true));
+    StatusCode::ACCEPTED.into_response()
+}
+
+/// XDG_DOWNLOAD_DIR from user-dirs.dirs, else ~/Downloads.
+fn download_dir() -> PathBuf {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_default();
+    let xdg = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".config"));
+    std::fs::read_to_string(xdg.join("user-dirs.dirs")).ok()
+        .and_then(|t| t.lines().find_map(|l| l.strip_prefix("XDG_DOWNLOAD_DIR=").map(|v| v.trim().trim_matches('"').to_string())))
+        .map(|v| match v.strip_prefix("$HOME") { Some(rest) => home.join(rest.trim_start_matches('/')), None => PathBuf::from(v) })
+        .filter(|p| p.is_absolute())
+        .unwrap_or_else(|| home.join("Downloads"))
 }
 
 fn finish(ctx: &Ctx, ok: bool, message: String) {
@@ -205,14 +252,19 @@ fn finish(ctx: &Ctx, ok: bool, message: String) {
     j.message = message;
 }
 
-fn run_child(ctx: &Ctx, target: PathBuf, setup: Option<PathBuf>) {
+/// `to_file`: a download into the user's own file, so no pkexec and resume
+/// whatever is already there.
+fn run_child(ctx: &Ctx, target: PathBuf, setup: Option<PathBuf>, to_file: bool) {
     let exe = std::env::current_exe().unwrap_or_else(|_| "thallium-flash".into());
-    let mut cmd = if is_root() { Command::new(&exe) } else {
+    let mut cmd = if to_file || is_root() { Command::new(&exe) } else {
         let mut c = Command::new("pkexec");
         c.arg(&exe);
         c
     };
     cmd.args(["flash", "--yes", "--machine", "--manifest", &ctx.manifest]);
+    if to_file && target.is_file() {
+        cmd.arg("--resume");
+    }
     if let Some(s) = &setup {
         cmd.arg("--setup").arg(s);
     }
@@ -253,6 +305,7 @@ fn run_child(ctx: &Ctx, target: PathBuf, setup: Option<PathBuf>) {
     let stderr = err_thread.join().unwrap_or_default();
     cleanup();
     match status {
+        Ok(s) if s.success() && to_file => finish(ctx, true, format!("Done. The ISO checks out: {}", target.display())),
         Ok(s) if s.success() => finish(ctx, true, "Done. The drive checks out, so you can unplug it and boot Thallium.".into()),
         Ok(s) if s.code() == Some(126) => finish(ctx, false, "Cancelled at the password prompt. Nothing was written.".into()),
         _ => finish(ctx, false, stderr.lines().last().unwrap_or("unknown error").trim_start_matches("Error: ").to_string()),

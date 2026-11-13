@@ -32,6 +32,7 @@
   button:disabled { opacity: .4; cursor: default; }
   button.primary { width: 100%; padding: 14px; border-color: var(--accent); color: var(--accent); background: #a7c08014; font-size: 13px; }
   button.primary:hover:not(:disabled) { background: #a7c08026; }
+  button.secondary { width: 100%; margin-top: 10px; padding: 10px; }
   .hint { color: var(--muted); font-size: 13px; margin-top: 8px; }
   .verdict { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
   .pill { font: 600 11px var(--mono); letter-spacing: .1em; padding: 3px 8px; border: 1px solid currentColor; }
@@ -114,6 +115,8 @@
   </section>
 
   <button class="primary" id="flash" disabled>Flash</button>
+  <button class="secondary" id="download" disabled>Download the ISO instead</button>
+  <p class="hint" id="download-hint">For a virtual machine or another flasher. Saved to your Downloads folder.</p>
   <div class="bar"><div id="fill"></div></div>
   <div id="status"></div>
 </main>
@@ -126,7 +129,7 @@ const api = (path, opts = {}) => fetch(path, { ...opts, headers: { "x-token": to
 const PILL = { ok: "READY", note: "READY, WITH NOTES", fail: "NOT SUPPORTED", info: "UNKNOWN" };
 const TAG = { ok: "OK", note: "NOTE", fail: "FAIL", info: "INFO" };
 const FIELDS = ["username", "full_name", "password", "hostname", "timezone", "locale", "keyboard", "wifi_ssid", "wifi_pass", "channel", "theme", "apps"];
-let drives = [], busy = false, canFlash = true, signedOut = false, autoSignin = false;
+let drives = [], busy = false, kind = "flash", canFlash = true, signedOut = false, autoSignin = false;
 
 function setStatus(text, cls = "") { $("status").textContent = text; $("status").className = cls; }
 
@@ -153,12 +156,14 @@ async function load() {
       <div><b>${esc(c.label)}</b> · ${esc(c.value)}<small>${esc(c.note)}</small></div></div>`).join("");
   if (!$("timezone").value) $("timezone").value = info.timezone;
   if (!$("locale").value) $("locale").value = info.locale;
+  $("download-hint").textContent = `For a virtual machine or another flasher. Saved to ${info.download_dir}.`;
   if (!canFlash) setStatus("Writing USB drives works on Linux only for now.", "note");
   update();
 }
 
 function update() {
   $("flash").disabled = busy || signedOut || !canFlash || !drives.length;
+  $("download").disabled = busy || signedOut;
   $("signin-btn").disabled = busy;
   $("refresh").disabled = busy;
   $("drive").disabled = busy;
@@ -185,14 +190,24 @@ async function flash() {
 }
 
 const PHASE = { download: "Downloading and writing", sync: "Finishing the write to the drive", verify: "Checking the drive", setup: "Saving your setup answers" };
+const PHASE_FILE = { download: "Downloading", sync: "Saving the file", verify: "Checking the file" };
+
+async function download() {
+  const r = await api("/api/download", { method: "POST" });
+  if (!r.ok) { setStatus(await r.text(), "fail"); return; }
+  busy = true; kind = "download"; update();
+  setStatus("Starting…");
+  poll();
+}
 let started = 0;
 async function poll() {
   const j = await (await api("/api/job")).json();
   if (j.phase === "download" && !started) started = Date.now();
+  kind = j.kind || "flash";
   if (j.running) {
     const frac = j.total ? j.done / j.total : 0;
     $("fill").style.width = (j.phase === "sync" ? 100 : frac * 100) + "%";
-    let text = PHASE[j.phase] || "Starting…";
+    let text = (kind === "download" ? PHASE_FILE : PHASE)[j.phase] || "Starting…";
     if (j.total && j.phase !== "sync") {
       text += `: ${gb(j.done)} of ${gb(j.total)}`;
       if (j.phase === "download" && started) {
@@ -220,6 +235,7 @@ $("signin-btn").onclick = async () => {
   else { $("signin-msg").textContent = await r.text(); update(); }
 };
 $("flash").onclick = flash;
+$("download").onclick = download;
 load().then(async () => { const j = await (await api("/api/job")).json(); if (j.running) { busy = true; update(); poll(); } });
 </script>
 </body>
